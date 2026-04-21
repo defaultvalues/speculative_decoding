@@ -114,7 +114,7 @@ class SimpleSpeculativeEngine:
             draft_past_key_values = self._rollback_kv_cache(draft_past_key_values, new_len)  # +1 因为 draft 还多了一个 token
             
             total_accepted_tokens += n_accepted
-            print(f"Iteration {iteration_count}: Accepted {n_accepted}/{K} tokens")
+            # print(f"Iteration {iteration_count}: Accepted {n_accepted}/{K} tokens")
 
             # 统计短时平均接受率
             # avg_acceptance_rates = 0.1 * n_accepted / K + 0.9 * avg_acceptance_rates

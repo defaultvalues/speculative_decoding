@@ -10,6 +10,14 @@
 
 ##  KV Cache回滚逻辑示意图
 
+1. 让draft model连续预测K的token，并将前K-1个token与初始输入送进target model进行验证
+
+![](./images/SD.svg)
+
+2. 将target model的输出结果与draft model的猜测结果比对，仅保留正确部分的KV cache
+
+![](./images/kv_roll.svg)
+
 
 ## 运行
 
@@ -22,8 +30,8 @@ uv run python speculative_eigen.py
 ```
 
 
-## TODO List
+## Todo List
 
 - [ ] Rejction Sampling
-- [ ] 
+
 
