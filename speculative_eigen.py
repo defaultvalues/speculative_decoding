@@ -18,7 +18,7 @@ class SimpleSpeculativeEngine:
             target_path, dtype=torch.bfloat16, device_map=device
         )
         
-        print(f"正在加载 Draft Model (1.5B)...")
+        print(f"正在加载 Draft Model (0.5B)...")
         self.draft_model = AutoModelForCausalLM.from_pretrained(
             draft_path, dtype=torch.bfloat16, device_map=device
         )
@@ -38,6 +38,7 @@ class SimpleSpeculativeEngine:
         # 统计数据
         total_accepted_tokens = 0
         iteration_count = 0
+        torch.cuda.synchronize()
         start_time = time.time()
 
         # 1. 预填充 (Prefill) Target Model，获取初始 KV Cache
@@ -51,7 +52,9 @@ class SimpleSpeculativeEngine:
         next_token_id = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
         input_ids = torch.cat([input_ids, next_token_id], dim=-1)
 
-        avg_acceptance_rates = 0.5  # 初始化平均接受率
+        avg_acceptance_rates = 1.0  # 初始化平均接受率
+
+        stop_generation = False
 
         while input_ids.shape[1] < inputs.input_ids.shape[1] + max_new_tokens:
             iteration_count += 1
@@ -68,6 +71,7 @@ class SimpleSpeculativeEngine:
             for _ in range(K):
                 draft_outputs = self.draft_model(draft_tokens[-1], 
                                                  past_key_values=draft_past_key_values, 
+                                                 do_sample=False,  # 使用贪心解码，确保生成结果的确定性，便于性能对比
                                                  use_cache=True)
                 
                 draft_past_key_values = draft_outputs.past_key_values
@@ -75,6 +79,17 @@ class SimpleSpeculativeEngine:
                 next_draft_token = torch.argmax(draft_outputs.logits[:, -1, :], dim=-1, keepdim=True)
 
                 draft_tokens.append(next_draft_token)
+            
+            # 改成一次性生成 K 个 token，减少循环内的模型调用次数
+            # draft_outputs = self.draft_model(
+            #     draft_tokens[-1], 
+            #     past_key_values=draft_past_key_values, 
+            #     use_cache=True,
+            #     max_new_tokens=K
+            # )
+
+            # draft_past_key_values = draft_outputs.past_key_values
+            # draft_tokens = torch.argmax(draft_outputs.logits[:, :, :], dim=-1)  # shape: [1, K]
             
             # 提取投机的 K 个 token
             speculated_tokens = torch.cat(draft_tokens[1:], dim=-1)  # shape: [1, K]
@@ -92,13 +107,16 @@ class SimpleSpeculativeEngine:
             # target_outputs.logits 包含了从 current_num_tokens 到最后的预测
             # 我们要对比的是：Target 对前 K 个位置的预测，是否等于 Draft 投机的 token
             # target_predicted_ids 的长度也是 K+1 (K个验证 + 1个多出来的bonus)
-            target_predicted_ids = torch.argmax(target_outputs.logits[:, :K, :], dim=-1)
+            target_predicted_ids = torch.argmax(target_outputs.logits[:, :K+1, :], dim=-1)
             
             # --- 步骤 C: 比较与接受 (The "Rollback" Logic) ---
             n_accepted = 0
             for i in range(K):  # 从 1 开始，因为第0个是我们之前已经接受的 token
                 if speculated_tokens[0, i] == target_predicted_ids[0, i]:
                     n_accepted += 1
+                    if speculated_tokens[0, i] == self.tokenizer.eos_token_id:
+                        stop_generation = True
+                        break  # 如果遇到 EOS token，提前结束接受
                 else:
                     break
             
@@ -114,42 +132,45 @@ class SimpleSpeculativeEngine:
             draft_past_key_values = self._rollback_kv_cache(draft_past_key_values, new_len)  # +1 因为 draft 还多了一个 token
             
             total_accepted_tokens += n_accepted
+            if stop_generation:
+                break
             # print(f"Iteration {iteration_count}: Accepted {n_accepted}/{K} tokens")
 
             # 统计短时平均接受率
-            # avg_acceptance_rates = 0.1 * n_accepted / K + 0.9 * avg_acceptance_rates
-
-            # if iteration_count % 5 == 0:
-            #     print(f"当前平均接受率: {avg_acceptance_rates:.2f}")
+            avg_acceptance_rates = 0.1 * n_accepted / K + 0.9 * avg_acceptance_rates
             
-            # if avg_acceptance_rates < 0.5:
-            #     K = max(4, K // 2)
-            
-            # if avg_acceptance_rates > 0.8:
-            #     K = max(16, K * 2)
+            if avg_acceptance_rates < 0.65:
+                print(f"平均接受率过低 ({avg_acceptance_rates:.2f})，提前结束投机 (已生成长度为 {input_ids.shape[1] - inputs.input_ids.shape[1]}），改用纯 Target Model 生成后续内容。")
+                break  # 如果接受率过低，提前结束生成，改用纯 Target Model 生成后续内容
+        
+        if input_ids.shape[1] < inputs.input_ids.shape[1] + max_new_tokens and not stop_generation:
+            output_ids = self.target_model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens-(input_ids.shape[1] - inputs.input_ids.shape[1]),
+                do_sample=False,  # 使用贪心解码，确保生成结果的确定性，便于性能对比
+                past_key_values=target_past_key_values,
+                pad_token_id=self.tokenizer.pad_token_id,
+                use_cache=True
+            )
 
+            input_ids = output_ids  # 直接使用 Target Model 生成剩余的部分
+
+        torch.cuda.synchronize()
         end_time = time.time()
         total_gen_len = input_ids.shape[1] - inputs.input_ids.shape[1]
         print(f"\n[结果] 总生成长度: {total_gen_len}")
         print(f"[平均接受率]: {total_accepted_tokens / (iteration_count * K):.2f}")
         print(f"[端到端速度]: {total_gen_len / (end_time - start_time):.2f} tokens/s")
         
-        return self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        return self.tokenizer.decode(input_ids[0], skip_special_tokens=True), end_time - start_time, total_gen_len, total_accepted_tokens / (iteration_count * K)
 
     def _rollback_kv_cache(self, cache: DynamicCache, keep_len: int):
         """
         将 DynamicCache 裁剪到指定的长度 keep_len
         """
 
-        print(f"正在回滚 KV Cache 到长度 {keep_len}...")
-
-        if cache is None:
-            return None
-        
-        # 1. 对每一层的 Tensor 进行切片 (dim=2 是 seq_len 维度)
-        for i in range(len(cache.layers)):
-            cache.layers[i].keys = cache.layers[i].keys[:, :, :keep_len, :]
-            cache.layers[i].values = cache.layers[i].values[:, :, :keep_len, :]
+        if cache is not None:
+            cache.crop(keep_len) 
         
         return cache
 
@@ -157,7 +178,7 @@ class SimpleSpeculativeEngine:
 if __name__ == "__main__":
     engine = SimpleSpeculativeEngine(TARGET_MODEL_PATH, DRAFT_MODEL_PATH)
     
-    prompt = "Please explain the concept of KV cache."
-    result = engine.generate(prompt, max_new_tokens=512, K=4)
-    # print("\n生成的文本内容: ")
-    # print(result)
+    prompt = "Write one sentence about the sun."
+    result, elapsed_time, total_gen_len, avg_acceptance_rate = engine.generate(prompt, max_new_tokens=128, K=6)
+    print("\n生成的文本内容: ")
+    print(result)
