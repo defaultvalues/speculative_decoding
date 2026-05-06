@@ -11,7 +11,7 @@ class SimpleEngine:
     基础的推理引擎，直接使用 Target Model 进行生成，不进行投机。
     主要用于性能基线对比。
     """
-    def __init__(self, target_path, draft_path, device="cuda"):
+    def __init__(self, target_path, draft_path, device="cuda:0"):
         self.device = device
         print(f"正在加载 Tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(target_path)
@@ -32,6 +32,7 @@ class SimpleEngine:
         """
         K: 投机步数 (lookahead window，基线不使用，保持接口一致)
         """
+
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
 
@@ -39,11 +40,17 @@ class SimpleEngine:
         start_time = time.time()
 
         output_ids = self.target_model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,  # 使用贪心解码，确保生成结果的确定性，便于性能对比
-            use_cache=True
-        )
+                        input_ids,  # 确保输入和 SD 的 input_ids 完全一致
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,          # 关闭采样
+                        temperature=1.0, 
+                        top_p=1.0, 
+                        top_k=0,
+                        repetition_penalty=1.0,   # 🚨 必须设为 1.0 关闭惩罚！
+                        length_penalty=1.0,       # 关闭长度惩罚
+                        renormalize_logits=False,
+                        return_dict_in_generate=False
+                    )
 
         torch.cuda.synchronize()
         end_time = time.time()
@@ -57,7 +64,7 @@ class SimpleEngine:
 if __name__ == "__main__":
     engine = SimpleEngine(TARGET_MODEL_PATH, DRAFT_MODEL_PATH)
     
-    prompt = "Compute the eigenvalues of the following matrix: [[2, 1], [1, 2]]."
-    result, elapsed_time, total_gen_len, avg_acceptance_rate = engine.generate(prompt, max_new_tokens=128, K=8)
+    prompt = "Implement a PyTorch Transformer encoder layer from scratch. "
+    result, elapsed_time, total_gen_len, avg_acceptance_rate = engine.generate(prompt, max_new_tokens=2048, K=8)
     print("\n生成的文本内容: ")
     print(result)
