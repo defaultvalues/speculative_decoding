@@ -1,6 +1,6 @@
 # A Simple LLM Inference Engine based on Speculative Decoding
 
-基于投机采样实现的一个大模型推理引擎，Target模型和Draft模型分别为Qwen 7B和1.5B。
+基于投机采样实现的一个单用户请求大模型推理引擎。
 
 ## 主要功能
 
