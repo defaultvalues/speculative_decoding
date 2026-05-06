@@ -90,22 +90,28 @@ $$
 
 - 假设接受率是$p$，即每个token被接受的概率为$p$，被拒绝的概率为$1-p$。
 - 设投机步长为$K$，实际被接受的token数量为$L$，则$L$服从分布：
-$$
-P(L=k) = p^k (1-p) \quad \text{for } k=0,1,...,K-1 \\
-P(L=K) = p^K
-$$
+\[
+P(L = k) =
+\begin{cases}
+p^k (1-p), & k = 0,1,...,K-1 \\
+p^K, & k = K
+\end{cases}
+\]
+
 - 此外，设 draft model 的生成速度为 $C_d$ s/token, target model 的生成速度为 $C_t$ s/token, 则每次生成的总时间为（假设验证的时间与$K$无关）：
-$$
+\[
 T = K \cdot C_d + C_t
-$$
+\]
+
 - 因此，平均生成速度为：
-$$
+\[
 \text{Average Speed} = \frac{\mathbb{E}[L]}{T} = \frac{p(1-p^K)}{(1-p)(K \cdot C_d + C_t)}
-$$
+\]
+
 - 相比与仅使用target model的速度$\frac{1}{C_t}$，加速比为：
-$$
+\[
 \text{Speedup} = \frac{\text{Average Speed}}{\frac{1}{C_t}} = \frac{p(1-p^K) C_t}{(1-p)(K \cdot C_d + C_t)}
-$$
+\]
 - 由此可以看出简单的 Trade-off：随着$K$的增加，分子和分母均递增，因此加速比并非简单的单调关系。
 - 实际情况则更为复杂，因为当$K$增加时，接受率$p$通常也会下降，这会进一步降低加速比；因此只有当接收率足够高的时候，投机采样才会带来明显的性能提升；本项目中则采用启发式的**自适应步长策略**，能够根据历史接受率动态调整投机步长，在不同任务下均取得稳定且接近最优的性能表现。
 
